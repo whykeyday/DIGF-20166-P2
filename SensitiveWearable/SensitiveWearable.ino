@@ -13,16 +13,16 @@ const int LDR_PIN = A0; // shared w speaker, read every 2s only
 const int NUM_PIXELS = 10;
 
 // pressure sensor - auto calibrate on boot
-const int PRESSURE_OFFSET = 250; // baseline ~100, press ~700
+const int PRESSURE_OFFSET = 150; // lower for thru fabric
 const int PRESSURE_HYS = 20;
 int pressBase = 0;
 int pressThresh = 200;
 
 // mic - peak hold
-const int SOUND_NOISY = 15;
+const int SOUND_NOISY = 25; // need real loud not just quiet noise
 
 // accel - movement detect
-const float MOTION_THRESH = 3.0; // ignore small shake from pressing
+const float MOTION_THRESH = 2.0; // bit lower for wearing on body
 const float ACCEL_SMOOTH = 0.15;
 
 // timers
