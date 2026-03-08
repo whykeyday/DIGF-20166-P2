@@ -1,351 +1,363 @@
-// ============================================================
-// SensitiveWearable.ino — "Take a Breath / Gentle Reminder"
-// For Adafruit Circuit Playground Express (CPX)
-// DIGF-20166 Project 2
-// ============================================================
-//
-// OVERVIEW:
-//   This wearable uses a GRADIENT COLOR system based on pick count:
-//     0 picks  = 🔵 calm blue breathing
-//     1 pick   = 🟡 yellow breathing
-//     2 picks  = 🟠 orange breathing
-//     3+ picks = 🔴 red breathing + gentle tone
-//   Plus:
-//     Noise boost: if environment is noisy, color shifts +1 step warmer
-//     Sedentary:   if no movement for 20s (test) / 2min (final),
-//                  green spinning dot overlay
-//
-// HARDWARE WIRING:
-//   DIY Pressure Sensor voltage divider:
-//     CPX 3.3V → Rvar (pressure patch) → Vout → Rfixed → GND
-//                                          └──→ CPX A2
-//
-// POWER:
-//   3× Ni-MH AA (1.2V each ≈ 3.6V) via JST battery connector
-// ============================================================
+// take a breath - wearable project
+// cpx + pressure sensor + ldr + mic
+// digf 20166 p2
 
 #include <Adafruit_CircuitPlayground.h>
 #include <math.h>
 
-// ─────────────────────────────────────────────
-// DEBUG MODE — forces obvious solid colors per pick count
-// 0=blue, 1=yellow, 2=orange, 3+=red, sedentary=green
-// Set to false for final smooth breathing animations.
-// ─────────────────────────────────────────────
-const bool DEBUG_MODE = false;
+// pins
+const int PRESSURE_PIN = A4;
+const int LDR_PIN = A0; // shared w speaker, read every 2s only
 
-// ─────────────────────────────────────────────
-// PIN CONFIGURATION
-// ─────────────────────────────────────────────
-const int PRESSURE_PIN = A2;
+// led stuff
+const int NUM_PIXELS = 10;
 
-// ─────────────────────────────────────────────
-// NEOPIXEL SETTINGS
-// ─────────────────────────────────────────────
-const int   NUM_PIXELS     = 10;
-const int   MAX_BRIGHTNESS = 10;   // Lowered for softer output (was 40)
+// pressure sensor - auto calibrate on boot
+const int PRESSURE_OFFSET = 250; // baseline ~100, press ~700
+const int PRESSURE_HYS = 20;
+int pressBase = 0;
+int pressThresh = 200;
 
-// ─────────────────────────────────────────────
-// PRESSURE SENSOR THRESHOLDS
-// ─────────────────────────────────────────────
-// >>> Tune these using Serial Monitor <<<
-const int   PRESSURE_THRESHOLD  = 120;   // Lowered for more sensitivity (was 200)
-const int   PRESSURE_HYSTERESIS = 8;     // Smaller gap for easier reset (was 15)
+// mic - peak hold
+const int SOUND_NOISY = 15;
 
-// ─────────────────────────────────────────────
-// PICK EVENT SLIDING WINDOW
-// ─────────────────────────────────────────────
-// Picks expire after this time, so color naturally fades back to blue
-const unsigned long PICK_WINDOW_MS = 15000; // 15-second window
+// accel - movement detect
+const float MOTION_THRESH = 3.0; // ignore small shake from pressing
+const float ACCEL_SMOOTH = 0.15;
 
-// ─────────────────────────────────────────────
-// SOUND (MIC) — DJ METER SETTINGS
-// ─────────────────────────────────────────────
-// Maps sound level to 0-10 purple overlay LEDs (like a VU meter).
-// SOUND_MIN = quiet room baseline (0 purple LEDs)
-// SOUND_MAX = loud environment (all 10 LEDs purple)
-// Tune these using Serial Monitor S_smo column.
-const int SOUND_MIN = 10;    // Below this = silence, 0 purple LEDs (was 50)
-const int SOUND_MAX = 150;   // At or above this = all 10 purple LEDs (was 500)
+// timers
+const unsigned long SIT_TIME = 30000; // 30s
+const float PRESS_SMOOTH = 0.5;
 
-// Red color for the DJ meter overlay (sound warning)
-const uint8_t PURPLE_R = 255;
-const uint8_t PURPLE_G =   0;
-const uint8_t PURPLE_B =   0;
+// breathing speed
+const unsigned long BREATH_CALM = 6000;  // 6s light green
+const unsigned long BREATH_DEEP = 10000; // 10s deep blue (4s in, 6s out)
 
-// ─────────────────────────────────────────────
-// ACCELEROMETER / SEDENTARY DETECTION
-// ─────────────────────────────────────────────
-const float MOTION_THRESHOLD       = 1.5;
-const float SMOOTH_ALPHA_ACCEL     = 0.15;
-const unsigned long SEDENTARY_TIME_MS = 20000; // 20s for testing (120000 = 2min final)
+// beep settings (only when press + loud)
+const int BEEP_HI = 523;
+const int BEEP_LO = 392;
+const int BEEP_LEN = 200;
 
-// ─────────────────────────────────────────────
-// SMOOTHING
-// ─────────────────────────────────────────────
-const float SMOOTH_ALPHA_PRESSURE = 0.5;
-const float SMOOTH_ALPHA_SOUND    = 0.3;
+// ldr brightness ctrl
+const int LDR_DARK = 200;
+const int LDR_BRIGHT = 900;
+const int BRIGHT_DARK = 10;  // dark room = brighter led
+const int BRIGHT_LIGHT = 0;  // strong light = off completely
 
-// ─────────────────────────────────────────────
-// TONE
-// ─────────────────────────────────────────────
-const bool ENABLE_TONE       = true;
-const int  TONE_FREQ         = 440;   // Hz
-const int  TONE_DURATION_MS  = 60;    // Very quick chirp (was 120)
-
-// ─────────────────────────────────────────────
-// BREATHING ANIMATION
-// ─────────────────────────────────────────────
-// Higher pick count = faster breathing cycle (more urgency)
-const unsigned long BREATH_CYCLE_0 = 6000;  // 6s for 0 picks (very calm)
-const unsigned long BREATH_CYCLE_1 = 5000;  // 5s for 1 pick
-const unsigned long BREATH_CYCLE_2 = 4000;  // 4s for 2 picks
-const unsigned long BREATH_CYCLE_3 = 3000;  // 3s for 3+ picks (guided breathing)
-
-// ============================================================
-// COLOR PALETTE — blue → yellow → orange → red gradient
-// Each entry is {R, G, B} at full brightness
-// ============================================================
-const uint8_t COLORS[][3] = {
-  {  60, 200, 120},  // Level 0: soft mint green (calm)
-  { 255, 220,   0},  // Level 1: warm yellow
-  { 255, 120,   0},  // Level 2: orange
-  { 255,  20,   0},  // Level 3: red (urgent but still warm)
+// 4 modes
+enum Mode {
+  MODE_RAINBOW,    // sit too long
+  MODE_GREEN,      // calm breathing
+  MODE_DEEPBLUE,   // pressing = stress
+  MODE_ORANGE      // moving around
 };
-const int MAX_COLOR_LEVEL = 3;
 
-// ============================================================
-// GLOBAL STATE
-// ============================================================
+// --- global vars ---
+Mode curMode = MODE_GREEN;
+unsigned long modeStart = 0;
 
-// — Smoothed sensor values —
-float smoothPressure = 0;
-float smoothSound    = 0;
+float smoothPress = 0;
+int sndPeak = 0;
 
-// — Pressure pick tracking —
-unsigned long pickTimestamps[20];  // Circular buffer
-int pickIndex   = 0;
-int pickCount   = 0;
-bool pickActive = false;
+float lastAccel = 0;
+float smoothDelta = 0;
+unsigned long lastMoveTime = 0;
+unsigned long lastActiveTime = 0;
+bool isMoving = false;
+const unsigned long MOVE_LINGER = 2000; // stay orange 2s after stop
 
-// — Accelerometer —
-float lastAccelMag       = 0;
-float smoothedAccelDelta = 0;
-unsigned long lastMotionTime = 0;
+bool picking = false;
+unsigned long lastPickTime = 0;
+const unsigned long PICK_LINGER = 500; // 0.5s delay b4 exit blue
 
-// — Serial —
-int serialLineCount = 0;
+int serialCnt = 0;
+unsigned long lastBeep = 0;
+int ldrVal = 500;
+unsigned long lastLdrRead = 0;
 
-// — Tone cooldown (avoid buzzing every loop) —
-unsigned long lastToneTime = 0;
+// unused rainbow palette kept just in case
+const uint8_t COLORS[][3] = {
+  {255, 40, 80}, {255, 100, 0}, {255, 200, 0},
+  {50, 255, 50}, {0, 220, 160}, {0, 120, 255},
+  {80, 40, 255}, {180, 0, 255}, {255, 0, 180}, {255, 60, 120}
+};
 
-// ============================================================
-// SETUP
-// ============================================================
+
 void setup() {
   Serial.begin(9600);
   CircuitPlayground.begin();
-  CircuitPlayground.setBrightness(MAX_BRIGHTNESS);
+  CircuitPlayground.setBrightness(BRIGHT_DARK);
   CircuitPlayground.clearPixels();
 
-  // Init accelerometer baseline
+  // read accel once
   float x = CircuitPlayground.motionX();
   float y = CircuitPlayground.motionY();
   float z = CircuitPlayground.motionZ();
-  lastAccelMag   = sqrt(x * x + y * y + z * z);
-  lastMotionTime = millis();
+  lastAccel = sqrt(x*x + y*y + z*z);
+  lastMoveTime = millis();
 
-  for (int i = 0; i < 20; i++) pickTimestamps[i] = 0;
+  // calibrate pressure - dont touch sensor!!
+  Serial.println(F("calibrating... dont touch sensor"));
+  for (int i = 0; i < NUM_PIXELS; i++)
+    CircuitPlayground.setPixelColor(i, 15, 15, 15); // white = calibrating
 
-  Serial.println(F("=== Sensitive Wearable Started ==="));
-  if (DEBUG_MODE) {
-    Serial.println(F(">>> DEBUG MODE: solid colors per level <<<"));
+  long sum = 0;
+  for (int n = 0; n < 20; n++) {
+    sum += analogRead(PRESSURE_PIN);
+    delay(50);
   }
-  Serial.println(F("\nP_raw\tP_smo\tS_raw\tS_smo\tPicks\tLevel\tSeden\tpickAct\tAccDlt"));
+  pressBase = (int)(sum / 20);
+  pressThresh = pressBase + PRESSURE_OFFSET;
+  smoothPress = pressBase;
+
+  CircuitPlayground.clearPixels();
+  Serial.print(F("base=")); Serial.print(pressBase);
+  Serial.print(F(" thresh=")); Serial.println(pressThresh);
+  Serial.println(F("P_raw\tP_smo\tSndPk\tMoving\tPicking\tNoisy\tMode\tLDR\tBright"));
 }
 
-// ============================================================
-// MAIN LOOP
-// ============================================================
+
 void loop() {
   unsigned long now = millis();
 
-  // ── 1. READ & SMOOTH SENSORS ──────────────────────────────
-  int rawPressure = analogRead(PRESSURE_PIN);
-  int rawSound    = CircuitPlayground.soundSensor();
+  // read pressure
+  int rawPress = analogRead(PRESSURE_PIN);
 
-  smoothPressure = (SMOOTH_ALPHA_PRESSURE * rawPressure)
-                 + ((1.0 - SMOOTH_ALPHA_PRESSURE) * smoothPressure);
-  smoothSound    = (SMOOTH_ALPHA_SOUND * rawSound)
-                 + ((1.0 - SMOOTH_ALPHA_SOUND) * smoothSound);
-
-  // ── 2. DETECT PRESSURE "PICK" EVENTS (edge detection) ─────
-  // Rising edge: pressure crosses above threshold
-  if (!pickActive && smoothPressure > (PRESSURE_THRESHOLD + PRESSURE_HYSTERESIS)) {
-    pickActive = true;
-    pickTimestamps[pickIndex] = now;
-    pickIndex = (pickIndex + 1) % 20;
-    Serial.println(F(">> PICK detected!"));
+  // read mic 10x, keep max (catch loud sounds)
+  int sndMax = 0;
+  for (int s = 0; s < 10; s++) {
+    int val = CircuitPlayground.soundSensor();
+    if (val > sndMax) sndMax = val;
   }
-  // Falling edge: pressure drops below threshold (reset for next pick)
-  if (pickActive && smoothPressure < (PRESSURE_THRESHOLD - PRESSURE_HYSTERESIS)) {
-    pickActive = false;
+  // peak hold - decay slow
+  if (sndMax > sndPeak) {
+    sndPeak = sndMax;
+  } else {
+    sndPeak = sndPeak - 1;
+    if (sndPeak < 0) sndPeak = 0;
   }
 
-  // Count picks within sliding window
-  pickCount = 0;
-  for (int i = 0; i < 20; i++) {
-    if (pickTimestamps[i] != 0 && (now - pickTimestamps[i]) < PICK_WINDOW_MS) {
-      pickCount++;
+  smoothPress = (PRESS_SMOOTH * rawPress) + ((1.0 - PRESS_SMOOTH) * smoothPress);
+
+  // detect pressing (0.5s linger so it dont flicker)
+  bool pressedNow = (smoothPress > (pressThresh + PRESSURE_HYS));
+  bool releasedNow = (smoothPress < (pressThresh - PRESSURE_HYS));
+
+  if (pressedNow) {
+    picking = true;
+    lastPickTime = now;
+  }
+  else if (releasedNow && (now - lastPickTime) > PICK_LINGER) {
+    if (picking) {
+      picking = false;
+      lastActiveTime = now; // reset sit timer
     }
   }
 
-  // ── 3. DETECT SEDENTARY (ACCELEROMETER) ───────────────────
+  // detect motion - skip while pressing (shake = false trigger)
   float ax = CircuitPlayground.motionX();
   float ay = CircuitPlayground.motionY();
   float az = CircuitPlayground.motionZ();
-  float accelMag = sqrt(ax * ax + ay * ay + az * az);
-  float rawDelta = fabs(accelMag - lastAccelMag);
-  lastAccelMag = accelMag;
+  float mag = sqrt(ax*ax + ay*ay + az*az);
+  float delta = fabs(mag - lastAccel);
+  lastAccel = mag;
 
-  smoothedAccelDelta = (SMOOTH_ALPHA_ACCEL * rawDelta)
-                     + ((1.0 - SMOOTH_ALPHA_ACCEL) * smoothedAccelDelta);
+  smoothDelta = (ACCEL_SMOOTH * delta) + ((1.0 - ACCEL_SMOOTH) * smoothDelta);
 
-  if (smoothedAccelDelta > MOTION_THRESHOLD) {
-    lastMotionTime = now;
+  if (smoothDelta > MOTION_THRESH && !picking) {
+    lastMoveTime = now;
+    lastActiveTime = now;
   }
 
-  bool isSedentary = (now - lastMotionTime) > SEDENTARY_TIME_MS;
+  isMoving = (now - lastMoveTime) < MOVE_LINGER;
 
-  // ── 4. CALCULATE COLOR LEVEL ──────────────────────────────
-  // Base level from pick count: 0, 1, 2, 3+
-  int colorLevel = pickCount;
-  if (colorLevel > MAX_COLOR_LEVEL) colorLevel = MAX_COLOR_LEVEL;
+  // check how long sitting
+  unsigned long lastAct = (lastActiveTime > lastMoveTime) ? lastActiveTime : lastMoveTime;
+  bool sitTooLong = ((now - lastAct) > SIT_TIME);
 
-  // ── 5. PLAY TONE at level 3 (once per cycle, not spamming) ─
-  if (ENABLE_TONE && colorLevel >= 3 && (now - lastToneTime) > 3000) {  // chirp every 3s (was 6s)
-    CircuitPlayground.playTone(TONE_FREQ, TONE_DURATION_MS);
-    lastToneTime = now;
+  bool loud = (sndPeak > SOUND_NOISY);
+
+  // pick mode - pressing > moving > calm > rainbow
+  Mode newMode;
+  if (picking) {
+    newMode = MODE_DEEPBLUE; // stress detected
+  }
+  else if (isMoving) {
+    newMode = MODE_ORANGE;
+  }
+  else if (!sitTooLong) {
+    newMode = MODE_GREEN; // calm
+  }
+  else {
+    newMode = MODE_RAINBOW; // move reminder
   }
 
-  // ── 6. RENDER BASE COLOR ──────────────────────────────────
-  if (isSedentary && colorLevel == 0) {
-    renderSedentary(now);
-  } else if (DEBUG_MODE) {
-    for (int i = 0; i < NUM_PIXELS; i++) {
-      CircuitPlayground.setPixelColor(i,
-        COLORS[colorLevel][0],
-        COLORS[colorLevel][1],
-        COLORS[colorLevel][2]);
+  // mode changed
+  if (newMode != curMode) {
+    curMode = newMode;
+    modeStart = now;
+    printMode(newMode);
+
+    // beep when enter blue + noisy
+    if (newMode == MODE_DEEPBLUE && loud) {
+      CircuitPlayground.speaker.enable(true);
+      CircuitPlayground.playTone(BEEP_HI, 100);
+      lastBeep = now;
     }
-  } else {
-    renderBreathing(now, colorLevel);
   }
 
-  // ── 7. DJ SOUND METER — purple overlay ─────────────────────
-  // Map smoothSound to number of purple LEDs (0–10)
-  // Louder = more purple pixels, like a DJ VU meter
-  int soundLevel = (int)smoothSound;
-  int purpleCount = 0;
-  if (soundLevel > SOUND_MIN) {
-    purpleCount = map(soundLevel, SOUND_MIN, SOUND_MAX, 0, NUM_PIXELS);
-    if (purpleCount > NUM_PIXELS) purpleCount = NUM_PIXELS;
-    if (purpleCount < 0) purpleCount = 0;
+  // keep beeping every 3s if blue + noisy
+  if (curMode == MODE_DEEPBLUE && loud && (now - lastBeep) > 3000) {
+    CircuitPlayground.speaker.enable(true);
+    int freq = ((now / 3000) % 2 == 0) ? BEEP_HI : BEEP_LO;
+    CircuitPlayground.playTone(freq, BEEP_LEN);
+    lastBeep = now;
   }
 
-  // Overwrite the last N pixels with purple (from pixel 9 downward)
-  // This way the base color is still visible on the remaining LEDs
-  for (int i = 0; i < purpleCount; i++) {
-    int pixelIdx = NUM_PIXELS - 1 - i;  // Fill from top down
-    CircuitPlayground.setPixelColor(pixelIdx, PURPLE_R, PURPLE_G, PURPLE_B);
+  // ldr brightness - read every 2s (A0 shared w speaker)
+  int bright;
+  if ((now - lastLdrRead) > 2000) {
+    ldrVal = analogRead(LDR_PIN);
+    lastLdrRead = now;
+    pinMode(A0, OUTPUT); // give A0 back to speaker
   }
 
-  // ── 8. SERIAL OUTPUT ──────────────────────────────────────
-  serialLineCount++;
-  if (serialLineCount % 40 == 0) {
-    Serial.println(F("P_raw\tP_smo\tS_raw\tS_smo\tPicks\tLevel\tSeden\tpickAct\tAccDlt\tPurple"));
+  if (ldrVal < LDR_DARK) {
+    // super dark = white light
+    bright = BRIGHT_DARK;
+    CircuitPlayground.setBrightness(bright);
+    for (int i = 0; i < NUM_PIXELS; i++)
+      CircuitPlayground.setPixelColor(i, 255, 255, 255);
+  }
+  else {
+    bright = map(ldrVal, LDR_DARK, LDR_BRIGHT, BRIGHT_DARK, BRIGHT_LIGHT);
+    bright = constrain(bright, BRIGHT_LIGHT, BRIGHT_DARK);
+
+    if (bright == 0) {
+      // too bright outside, turn off leds
+      CircuitPlayground.clearPixels();
+    }
+    else {
+      CircuitPlayground.setBrightness(bright);
+
+      // show the right color mode
+      switch (curMode) {
+        case MODE_ORANGE: showOrange(); break;
+        case MODE_DEEPBLUE: showDeepBlue(now, loud); break;
+        case MODE_GREEN: showGreen(now); break;
+        case MODE_RAINBOW: showRainbow(now); break;
+      }
+    }
   }
 
-  Serial.print(rawPressure);      Serial.print('\t');
-  Serial.print((int)smoothPressure); Serial.print('\t');
-  Serial.print(rawSound);         Serial.print('\t');
-  Serial.print((int)smoothSound); Serial.print('\t');
-  Serial.print(pickCount);        Serial.print('\t');
-  Serial.print(colorLevel);       Serial.print('\t');
-  Serial.print(isSedentary ? 1 : 0); Serial.print('\t');
-  Serial.print(pickActive ? 1 : 0);  Serial.print('\t');
-  Serial.print(smoothedAccelDelta, 2); Serial.print('\t');
-  Serial.println(purpleCount);
+  // serial monitor debug
+  serialCnt++;
+  if (serialCnt % 40 == 0) {
+    Serial.println(F("P_raw\tP_smo\tSndPk\tMoving\tPicking\tNoisy\tMode\tLDR\tBright"));
+  }
+  Serial.print(rawPress); Serial.print('\t');
+  Serial.print((int)smoothPress); Serial.print('\t');
+  Serial.print(sndPeak); Serial.print('\t');
+  Serial.print(isMoving ? 1 : 0); Serial.print('\t');
+  Serial.print(picking ? 1 : 0); Serial.print('\t');
+  Serial.print(loud ? 1 : 0); Serial.print('\t');
+  Serial.print(curMode); Serial.print('\t');
+  Serial.print(ldrVal); Serial.print('\t');
+  Serial.println(bright);
 
   delay(50);
 }
 
-// ============================================================
-// RENDER: Breathing animation with color from gradient
-// ============================================================
-void renderBreathing(unsigned long now, int level) {
-  // Higher level = faster breathing cycle
-  unsigned long cycleMs;
-  switch (level) {
-    case 0:  cycleMs = BREATH_CYCLE_0; break;
-    case 1:  cycleMs = BREATH_CYCLE_1; break;
-    case 2:  cycleMs = BREATH_CYCLE_2; break;
-    default: cycleMs = BREATH_CYCLE_3; break;
+
+// orange = moving!
+void showOrange() {
+  for (int i = 0; i < NUM_PIXELS; i++)
+    CircuitPlayground.setPixelColor(i, 255, 60, 0);
+}
+
+// deep blue breathing - 4s inhale 6s exhale
+void showDeepBlue(unsigned long now, bool loud) {
+  unsigned long t = (now - modeStart) % BREATH_DEEP;
+  float wave;
+
+  if (t < 4000) {
+    wave = (float)t / 4000.0; // inhale
+  } else {
+    wave = 1.0 - ((float)(t - 4000) / 6000.0); // exhale
   }
 
-  // Sine wave breathing: smooth 0.0 – 1.0 – 0.0
-  float phase = (float)(now % cycleMs) / (float)cycleMs;
-  float wave  = (sin(phase * 2.0 * PI) + 1.0) / 2.0;
+  // smooth it
+  wave = (sin((wave - 0.5) * PI) + 1.0) / 2.0;
 
-  // Scale the color by the wave, with a minimum floor so it doesn't go fully off
-  float minBright = 0.08;  // Always slightly visible
-  float brightness = minBright + wave * (1.0 - minBright);
+  float minB = 0.25; // never fully off
+  float br = minB + wave * (1.0 - minB);
 
-  // Apply brightness scaling (0.5 max to keep power draw low)
-  uint8_t r = (uint8_t)(COLORS[level][0] * brightness * 0.5);
-  uint8_t g = (uint8_t)(COLORS[level][1] * brightness * 0.5);
-  uint8_t b = (uint8_t)(COLORS[level][2] * brightness * 0.5);
+  uint8_t r = (uint8_t)(10 * br);
+  uint8_t g = (uint8_t)(30 * br);
+  uint8_t b = (uint8_t)(255 * br);
+
+  for (int i = 0; i < NUM_PIXELS; i++)
+    CircuitPlayground.setPixelColor(i, r, g, b);
+}
+
+// calm green breathing - 6s cycle
+void showGreen(unsigned long now) {
+  float phase = (float)(now % BREATH_CALM) / (float)BREATH_CALM;
+  float wave = (sin(phase * 2.0 * PI) + 1.0) / 2.0;
+
+  float minB = 0.25;
+  float br = minB + wave * (1.0 - minB);
+
+  uint8_t r = (uint8_t)(30 * br);
+  uint8_t g = (uint8_t)(220 * br);
+  uint8_t b = (uint8_t)(80 * br);
+
+  for (int i = 0; i < NUM_PIXELS; i++)
+    CircuitPlayground.setPixelColor(i, r, g, b);
+}
+
+// hsv helper for rainbow
+void hsv2rgb(float h, float s, float v, uint8_t &r, uint8_t &g, uint8_t &b) {
+  int hi = (int)(h / 60.0) % 6;
+  float f = h / 60.0 - (int)(h / 60.0);
+  float p = v * (1.0 - s);
+  float q = v * (1.0 - f * s);
+  float t = v * (1.0 - (1.0 - f) * s);
+  float rr, gg, bb;
+  switch (hi) {
+    case 0: rr=v; gg=t; bb=p; break;
+    case 1: rr=q; gg=v; bb=p; break;
+    case 2: rr=p; gg=v; bb=t; break;
+    case 3: rr=p; gg=q; bb=v; break;
+    case 4: rr=t; gg=p; bb=v; break;
+    default: rr=v; gg=p; bb=q; break;
+  }
+  r = (uint8_t)(rr * 255);
+  g = (uint8_t)(gg * 255);
+  b = (uint8_t)(bb * 255);
+}
+
+// rainbow spinning - sit too long reminder
+void showRainbow(unsigned long now) {
+  float rot = (float)(now % 4000) / 4000.0 * 360.0;
+  float pulse = (sin((float)(now % 4000) / 4000.0 * 2.0 * PI) + 1.0) / 2.0;
+  float br = 0.20 + pulse * 0.30;
 
   for (int i = 0; i < NUM_PIXELS; i++) {
+    float hue = fmod(rot + (float)i * 36.0, 360.0);
+    uint8_t r, g, b;
+    hsv2rgb(hue, 1.0, br, r, g, b);
     CircuitPlayground.setPixelColor(i, r, g, b);
   }
 }
 
-// ============================================================
-// RENDER: Sedentary — macaron pastel rainbow marquee
-// Soft, dreamy rotating rainbow that gently nudges you to move.
-// ============================================================
-
-// Candy palette — saturated colors that look distinct on NeoPixels
-// (Pastels look white because all RGB channels are high;
-//  these have one dominant channel so each color pops)
-const uint8_t MACARON[][3] = {
-  { 255,  40,  80 },  // candy pink
-  { 255, 100,   0 },  // tangerine
-  { 255, 200,   0 },  // golden yellow
-  {  50, 255,  50 },  // lime green
-  {   0, 220, 160 },  // teal mint
-  {   0, 120, 255 },  // ocean blue
-  {  80,  40, 255 },  // indigo
-  { 180,   0, 255 },  // violet
-  { 255,   0, 180 },  // magenta
-  { 255,  60, 120 },  // hot pink
-};
-
-void renderSedentary(unsigned long now) {
-  // Slowly rotate the rainbow around the ring (10s full rotation)
-  float phase = (float)(now % 10000) / 10000.0;
-  int offset = (int)(phase * NUM_PIXELS);
-
-  // Gentle pulsing brightness (subtle breathing on top of rainbow)
-  float pulse = (sin((float)(now % 4000) / 4000.0 * 2.0 * PI) + 1.0) / 2.0;
-  float bright = 0.10 + pulse * 0.15;  // Range 0.10 – 0.25 (dim & soft)
-
-  for (int i = 0; i < NUM_PIXELS; i++) {
-    int colorIdx = (i + offset) % NUM_PIXELS;
-    CircuitPlayground.setPixelColor(i,
-      (uint8_t)(MACARON[colorIdx][0] * bright),
-      (uint8_t)(MACARON[colorIdx][1] * bright),
-      (uint8_t)(MACARON[colorIdx][2] * bright));
+// print what mode changed to
+void printMode(Mode m) {
+  Serial.print(F(">> "));
+  switch (m) {
+    case MODE_ORANGE: Serial.println(F("ORANGE - moving")); break;
+    case MODE_DEEPBLUE: Serial.println(F("DEEP BLUE - take a breath")); break;
+    case MODE_GREEN: Serial.println(F("GREEN - calm")); break;
+    case MODE_RAINBOW: Serial.println(F("RAINBOW - go move!")); break;
   }
 }
