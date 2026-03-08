@@ -1,32 +1,23 @@
-// take a breath - wearable project
-// cpx + pressure sensor + ldr + mic
-// digf 20166 p2
+// take a breath - wearable project - digf 20166 p2
+
 
 #include <Adafruit_CircuitPlayground.h>
 #include <math.h>
 
-// pins
 const int PRESSURE_PIN = A4;
-const int LDR_PIN = A0; // shared w speaker, read every 2s only
-
-// led stuff
+const int LDR_PIN = A0; 
 const int NUM_PIXELS = 10;
 
-// pressure sensor - auto calibrate on boot
-const int PRESSURE_OFFSET = 150; // lower for thru fabric
+const int PRESSURE_OFFSET = 150; 
 const int PRESSURE_HYS = 20;
 int pressBase = 0;
 int pressThresh = 200;
-
-// mic - peak hold
-const int SOUND_NOISY = 25; // need real loud not just quiet noise
-
-// accel - movement detect
-const float MOTION_THRESH = 2.0; // bit lower for wearing on body
+const int SOUND_NOISY = 25; 
+const float MOTION_THRESH = 2.0; 
 const float ACCEL_SMOOTH = 0.15;
 
 // timers
-const unsigned long SIT_TIME = 30000; // 30s
+const unsigned long SIT_TIME = 1800000; // 30min
 const float PRESS_SMOOTH = 0.5;
 
 // breathing speed
@@ -38,18 +29,17 @@ const int BEEP_HI = 523;
 const int BEEP_LO = 392;
 const int BEEP_LEN = 200;
 
-// ldr brightness ctrl
 const int LDR_DARK = 200;
 const int LDR_BRIGHT = 900;
 const int BRIGHT_DARK = 10;  // dark room = brighter led
-const int BRIGHT_LIGHT = 0;  // strong light = off completely
+const int BRIGHT_LIGHT = 0;  
 
 // 4 modes
 enum Mode {
   MODE_RAINBOW,    // sit too long
   MODE_GREEN,      // calm breathing
   MODE_DEEPBLUE,   // pressing = stress
-  MODE_ORANGE      // moving around
+  MODE_ORANGE      // activity
 };
 
 // --- global vars ---
@@ -75,13 +65,6 @@ unsigned long lastBeep = 0;
 int ldrVal = 500;
 unsigned long lastLdrRead = 0;
 
-// unused rainbow palette kept just in case
-const uint8_t COLORS[][3] = {
-  {255, 40, 80}, {255, 100, 0}, {255, 200, 0},
-  {50, 255, 50}, {0, 220, 160}, {0, 120, 255},
-  {80, 40, 255}, {180, 0, 255}, {255, 0, 180}, {255, 60, 120}
-};
-
 
 void setup() {
   Serial.begin(9600);
@@ -89,7 +72,6 @@ void setup() {
   CircuitPlayground.setBrightness(BRIGHT_DARK);
   CircuitPlayground.clearPixels();
 
-  // read accel once
   float x = CircuitPlayground.motionX();
   float y = CircuitPlayground.motionY();
   float z = CircuitPlayground.motionZ();
@@ -99,7 +81,7 @@ void setup() {
   // calibrate pressure - dont touch sensor!!
   Serial.println(F("calibrating... dont touch sensor"));
   for (int i = 0; i < NUM_PIXELS; i++)
-    CircuitPlayground.setPixelColor(i, 15, 15, 15); // white = calibrating
+    CircuitPlayground.setPixelColor(i, 15, 15, 15); // white 
 
   long sum = 0;
   for (int n = 0; n < 20; n++) {
@@ -118,12 +100,10 @@ void setup() {
 
 
 void loop() {
-  unsigned long now = millis();
-
-  // read pressure
+  unsigned long now = millis(); 
   int rawPress = analogRead(PRESSURE_PIN);
 
-  // read mic 10x, keep max (catch loud sounds)
+  // catch loud sounds
   int sndMax = 0;
   for (int s = 0; s < 10; s++) {
     int val = CircuitPlayground.soundSensor();
@@ -154,7 +134,7 @@ void loop() {
     }
   }
 
-  // detect motion - skip while pressing (shake = false trigger)
+  // detect motion - skip while pressing 
   float ax = CircuitPlayground.motionX();
   float ay = CircuitPlayground.motionY();
   float az = CircuitPlayground.motionZ();
@@ -177,10 +157,10 @@ void loop() {
 
   bool loud = (sndPeak > SOUND_NOISY);
 
-  // pick mode - pressing > moving > calm > rainbow
+  //mode - pressing > moving > calm > rainbow
   Mode newMode;
   if (picking) {
-    newMode = MODE_DEEPBLUE; // stress detected
+    newMode = MODE_DEEPBLUE; 
   }
   else if (isMoving) {
     newMode = MODE_ORANGE;
@@ -214,16 +194,15 @@ void loop() {
     lastBeep = now;
   }
 
-  // ldr brightness - read every 2s (A0 shared w speaker)
+  // ldr brightness read every 2s 
   int bright;
   if ((now - lastLdrRead) > 2000) {
     ldrVal = analogRead(LDR_PIN);
     lastLdrRead = now;
-    pinMode(A0, OUTPUT); // give A0 back to speaker
+    pinMode(A0, OUTPUT); // (A0 shared w speaker) give A0 back to speaker
   }
 
   if (ldrVal < LDR_DARK) {
-    // super dark = white light
     bright = BRIGHT_DARK;
     CircuitPlayground.setBrightness(bright);
     for (int i = 0; i < NUM_PIXELS; i++)
@@ -234,7 +213,6 @@ void loop() {
     bright = constrain(bright, BRIGHT_LIGHT, BRIGHT_DARK);
 
     if (bright == 0) {
-      // too bright outside, turn off leds
       CircuitPlayground.clearPixels();
     }
     else {
@@ -250,7 +228,7 @@ void loop() {
     }
   }
 
-  // serial monitor debug
+  // serial monitor 
   serialCnt++;
   if (serialCnt % 40 == 0) {
     Serial.println(F("P_raw\tP_smo\tSndPk\tMoving\tPicking\tNoisy\tMode\tLDR\tBright"));
@@ -269,13 +247,12 @@ void loop() {
 }
 
 
-// orange = moving!
+
 void showOrange() {
   for (int i = 0; i < NUM_PIXELS; i++)
     CircuitPlayground.setPixelColor(i, 255, 60, 0);
 }
 
-// deep blue breathing - 4s inhale 6s exhale
 void showDeepBlue(unsigned long now, bool loud) {
   unsigned long t = (now - modeStart) % BREATH_DEEP;
   float wave;
@@ -286,7 +263,7 @@ void showDeepBlue(unsigned long now, bool loud) {
     wave = 1.0 - ((float)(t - 4000) / 6000.0); // exhale
   }
 
-  // smooth it
+  // smooth 
   wave = (sin((wave - 0.5) * PI) + 1.0) / 2.0;
 
   float minB = 0.25; // never fully off
@@ -300,7 +277,7 @@ void showDeepBlue(unsigned long now, bool loud) {
     CircuitPlayground.setPixelColor(i, r, g, b);
 }
 
-// calm green breathing - 6s cycle
+// calm green breathing cycle
 void showGreen(unsigned long now) {
   float phase = (float)(now % BREATH_CALM) / (float)BREATH_CALM;
   float wave = (sin(phase * 2.0 * PI) + 1.0) / 2.0;
@@ -316,7 +293,7 @@ void showGreen(unsigned long now) {
     CircuitPlayground.setPixelColor(i, r, g, b);
 }
 
-// hsv helper for rainbow
+// hsv rainbow
 void hsv2rgb(float h, float s, float v, uint8_t &r, uint8_t &g, uint8_t &b) {
   int hi = (int)(h / 60.0) % 6;
   float f = h / 60.0 - (int)(h / 60.0);
@@ -337,7 +314,6 @@ void hsv2rgb(float h, float s, float v, uint8_t &r, uint8_t &g, uint8_t &b) {
   b = (uint8_t)(bb * 255);
 }
 
-// rainbow spinning - sit too long reminder
 void showRainbow(unsigned long now) {
   float rot = (float)(now % 4000) / 4000.0 * 360.0;
   float pulse = (sin((float)(now % 4000) / 4000.0 * 2.0 * PI) + 1.0) / 2.0;
@@ -351,7 +327,6 @@ void showRainbow(unsigned long now) {
   }
 }
 
-// print what mode changed to
 void printMode(Mode m) {
   Serial.print(F(">> "));
   switch (m) {
